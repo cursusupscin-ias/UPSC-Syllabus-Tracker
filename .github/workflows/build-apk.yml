@@ -44,6 +44,9 @@ jobs:
           mkdir -p ~/.bubblewrap
           printf '{"jdkPath":"%s","androidSdkPath":"%s"}\n' "$JAVA_HOME" "$ANDROID_SDK_ROOT" > ~/.bubblewrap/config.json
           cat ~/.bubblewrap/config.json
+          CMD_TOOLS_DIR=$(find "$ANDROID_SDK_ROOT/cmdline-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)
+          ln -s "$CMD_TOOLS_DIR" "$ANDROID_SDK_ROOT/tools"
+          echo "Bubblewrap SDK compatibility path: $ANDROID_SDK_ROOT/tools"
 
       - name: Generate twa-manifest.json
         run: python3 .github/scripts/make-twa-manifest.py
