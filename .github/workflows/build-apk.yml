@@ -42,7 +42,7 @@ jobs:
         run: |
           npm install -g @bubblewrap/cli
           mkdir -p ~/.bubblewrap
-          printf '{"jdkPath":"%s","androidSdkPath":"%s"}\n' "$JAVA_HOME" "$ANDROID_HOME" > ~/.bubblewrap/config.json
+          printf '{"jdkPath":"%s","androidSdkPath":"%s"}\n' "$JAVA_HOME" "$ANDROID_SDK_ROOT" > ~/.bubblewrap/config.json
           cat ~/.bubblewrap/config.json
 
       - name: Generate twa-manifest.json
