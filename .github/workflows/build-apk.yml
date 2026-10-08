@@ -1,0 +1,125 @@
+name: Build Android APK
+
+# Wraps the GitHub Pages PWA in a Trusted Web Activity (Chrome-based, so Google sign-in is allowed).
+# Needs: repository variable SITE_URL (final https Pages URL) and the site already deployed.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      SITE_URL: ${{ vars.SITE_URL }}
+      OWNER: ${{ github.repository_owner }}
+      RUN_NUMBER: ${{ github.run_number }}
+      KEY_ALIAS: upsc-tracker
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the site is live and installable
+        run: |
+          set -e
+          [ -n "$SITE_URL" ] || { echo "::error::Create the repository variable SITE_URL (Settings > Secrets and variables > Actions > Variables)."; exit 1; }
+          BASE="${SITE_URL%/}/"
+          for f in "" manifest.webmanifest sw.js icon-512.png icon-maskable-512.png firebase-config.js; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -L "${BASE}${f}")
+            echo "${BASE}${f} -> HTTP $code"
+            [ "$code" = "200" ] || { echo "::error::${BASE}${f} returned HTTP $code. Deploy GitHub Pages first."; exit 1; }
+          done
+
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 17 }
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Bubblewrap and point it at the SDK/JDK (non-interactive)
+        run: |
+          npm install -g @bubblewrap/cli
+          mkdir -p ~/.bubblewrap
+          printf '{"jdkPath":"%s","androidSdkPath":"%s"}\n' "$JAVA_HOME" "$ANDROID_HOME" > ~/.bubblewrap/config.json
+          cat ~/.bubblewrap/config.json
+
+      - name: Generate twa-manifest.json
+        run: python3 .github/scripts/make-twa-manifest.py
+
+      - name: Signing key (reuse from secrets, or create on first build)
+        id: key
+        env:
+          KS_B64: ${{ secrets.UPSC_TRACKER_KEYSTORE_B64 }}
+          KS_PASS: ${{ secrets.UPSC_TRACKER_KEYSTORE_PASSWORD }}
+          KEY_PASS: ${{ secrets.UPSC_TRACKER_KEY_PASSWORD }}
+          REPO_PRIVATE: ${{ github.event.repository.private }}
+        run: |
+          set -e
+          cd twa-build
+          if [ -n "$KS_B64" ] && [ -n "$KS_PASS" ]; then
+            echo "$KS_B64" | base64 -d > release.keystore
+            echo "::add-mask::$KS_PASS"
+            echo "BUBBLEWRAP_KEYSTORE_PASSWORD=$KS_PASS" >> "$GITHUB_ENV"
+            echo "BUBBLEWRAP_KEY_PASSWORD=${KEY_PASS:-$KS_PASS}" >> "$GITHUB_ENV"
+            echo "new_key=false" >> "$GITHUB_OUTPUT"
+            echo "Using the signing key from repository secrets."
+          else
+            if [ "$REPO_PRIVATE" != "true" ]; then
+              echo "::error::No signing-key secrets found, and this repository is PUBLIC, so the workflow will not create a key and upload it as an artifact (anyone could download it)."
+              echo "::error::Create the key on your own computer, then add the 3 secrets listed in README.md > Signing key:"
+              echo "::error::keytool -genkeypair -v -keystore release.keystore -alias upsc-tracker -keyalg RSA -keysize 2048 -validity 10000"
+              exit 1
+            fi
+            PASS=$(openssl rand -hex 16)
+            echo "::add-mask::$PASS"
+            keytool -genkeypair -v -keystore release.keystore -alias "$KEY_ALIAS" -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass "$PASS" -keypass "$PASS" -dname "CN=UPSC Tracker, O=Personal, C=IN"
+            echo "BUBBLEWRAP_KEYSTORE_PASSWORD=$PASS" >> "$GITHUB_ENV"
+            echo "BUBBLEWRAP_KEY_PASSWORD=$PASS" >> "$GITHUB_ENV"
+            mkdir -p ../first-build-key
+            cp release.keystore ../first-build-key/
+            base64 -w0 release.keystore > ../first-build-key/UPSC_TRACKER_KEYSTORE_B64.txt
+            printf '%s' "$PASS" > ../first-build-key/UPSC_TRACKER_KEYSTORE_PASSWORD_and_KEY_PASSWORD.txt
+            echo "new_key=true" >> "$GITHUB_OUTPUT"
+            echo "Created a NEW signing key (private repo). Download the 'first-build-key' artifact and save it as secrets."
+          fi
+
+      - name: Generate the Android project and build the signed APK
+        working-directory: twa-build
+        run: |
+          set -e
+          bubblewrap update --manifest=./twa-manifest.json --skipVersionUpgrade
+          bubblewrap build --skipPwaValidation
+          ls -la
+
+      - name: Digital Asset Links (lets the app open without a browser address bar)
+        working-directory: twa-build
+        run: |
+          set -e
+          FP=$(keytool -list -v -keystore release.keystore -alias "$KEY_ALIAS" -storepass "$BUBBLEWRAP_KEYSTORE_PASSWORD" | awk '/SHA256:/{print $2; exit}')
+          [ -n "$FP" ] || { echo "::error::Could not read the certificate fingerprint (wrong alias or password?)"; exit 1; }
+          printf '[{"relation":["delegate_permission/common.handle_all_urls"],"target":{"namespace":"android_app","package_name":"%s","sha256_cert_fingerprints":["%s"]}}]\n' "$PACKAGE_ID" "$FP" > assetlinks.json
+          cat assetlinks.json
+          cp app-release-signed.apk upsc-tracker.apk
+          echo "### APK built" >> "$GITHUB_STEP_SUMMARY"
+          echo "Package: \`$PACKAGE_ID\`  Fingerprint: \`$FP\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "Publish \`assetlinks.json\` at \`https://$SITE_HOST/.well-known/assetlinks.json\` (see README)." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload APK + assetlinks.json
+        uses: actions/upload-artifact@v4
+        with:
+          name: upsc-tracker-apk
+          path: |
+            twa-build/upsc-tracker.apk
+            twa-build/assetlinks.json
+          if-no-files-found: error
+
+      - name: Upload first-build signing key (private repositories only)
+        if: steps.key.outputs.new_key == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: first-build-key
+          path: first-build-key/
+          retention-days: 3
+          if-no-files-found: error

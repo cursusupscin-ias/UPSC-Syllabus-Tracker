@@ -1,0 +1,15 @@
+.DS_Store
+Thumbs.db
+*.log
+# signing material must never be committed
+*.keystore
+*.jks
+release.keystore
+app-release-*.apk
+app-release-*.aab
+# local milestone backups
+index_backup_*
+*.html_
+# bubblewrap working dirs
+twa-build/
+node_modules/
